@@ -1,1 +1,1 @@
-boise.cs.colostate.edu:5223
+salem.cs.colostate.edu:5223

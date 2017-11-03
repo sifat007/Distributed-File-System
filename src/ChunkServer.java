@@ -10,6 +10,7 @@ public class ChunkServer extends Thread{
 	ExecutorService threadPool = Executors.newFixedThreadPool(20);
 	
 	HashMap<String, ArrayList<File>> fileToChunkHash; //hashmap: filename -> list of chunk files
+	HashMap<String, ArrayList<File>> transientFileToChunkHash; //hashmap: filename -> list of chunk files
 	
 	HashMap<String, File> chunkToMetaDataHash; //hashmap: chunk fileanme -> file handle for metadata
 	HashMap<String, File> chunkToChecksumHash; //hashmap: chunk fileanme -> file handle for checksum
@@ -36,6 +37,7 @@ public class ChunkServer extends Thread{
 	public ChunkServer(int port) {
 		this.port = port;
 		this.fileToChunkHash = new HashMap<>();
+		this.transientFileToChunkHash = new HashMap<>();
 		this.chunkToChecksumHash = new HashMap<>();
 		this.chunkToMetaDataHash = new HashMap<>();
 		
@@ -81,6 +83,15 @@ public class ChunkServer extends Thread{
 		}
 		chunks.add(chunkFile);
 		fileToChunkHash.put(originalFileName, chunks);
+		
+		//track new files; will be removed as soon as pushed to the controller
+		chunks = transientFileToChunkHash.get(originalFileName);
+		if(chunks == null) {
+			chunks = new ArrayList<>();			
+		}
+		chunks.add(chunkFile);
+		transientFileToChunkHash.put(originalFileName, chunks);
+		
 		File checksumFile = this.createChecksumFile(chunkFile);
 		chunkToChecksumHash.put(chunkFile.getName(),checksumFile);
 		
@@ -168,12 +179,67 @@ public class ChunkServer extends Thread{
 
 class ChunkServerHeartbeatThread extends Thread{
 	ChunkServer cs;
+	
 	public ChunkServerHeartbeatThread(ChunkServer cs) {
 		this.cs = cs;
 	}
+	public void sendInfo(long heartbeatCount) {  //heartbeat count decides whether we send a major or minor heartbeat
+		Socket sock = null;		
+		try {
+			sock = new Socket(cs.CONTROLLER_HOST, cs.CONTROLLER_PORT);
+		} catch (IOException e) {
+			System.out.println("[Heartbeat]Could not connect to the controller. " + e.getMessage());			
+		}
+		try {		
+			if(sock!=null) {
+				if(heartbeatCount % 10 == 0) {
+					System.out.println("Major Heartbeat.");
+					Utils.writeStringToSocket(sock, "#MAJOR_HEARTBEAT#");
+					//write chunk server info
+					String server_info = InetAddress.getLocalHost().getCanonicalHostName() +","+ 
+										cs.port +","+ 
+										new File(Utils.STORAGE_PATH).getUsableSpace() +","+
+										cs.chunkToMetaDataHash.keySet().size();
+					Utils.writeStringToSocket(sock, server_info);
+					for(String chunkfilename:cs.chunkToMetaDataHash.keySet()) {						
+						File metaFile = cs.chunkToMetaDataHash.get(chunkfilename);
+						//out.println( version + 1 ); //increment version
+//					    out.println(sequence);
+//					    out.println(originalFileName);
+//					    out.println(System.currentTimeMillis());	
+						System.out.println(metaFile);
+						try(Scanner scanner = new Scanner(metaFile)){
+							String chunk_info = "";
+							scanner.nextLine(); //skip version
+							String sequence = scanner.nextLine();
+							String originalFileName = scanner.nextLine();
+							scanner.nextLine(); //skip timestamp
+							chunk_info = chunkfilename + "," +originalFileName + "," + sequence;
+							Utils.writeStringToSocket(sock, chunk_info);
+						}
+					}
+				}else { //minor heartbeat
+					System.out.println("Minor Heartbeat.");
+					Utils.writeStringToSocket(sock, "#MINOR_HEARTBEAT#");
+				}
+				sock.close();
+			}				
+		} catch (IOException e1) {
+			e1.printStackTrace();
+		}
+	}
 	@Override
 	public void run() {
-		
+		long heartbeatCount = 0;
+		while(cs.RUNNING) {
+			this.sendInfo(heartbeatCount);			
+			heartbeatCount++;
+			try {
+				Thread.sleep(5 * 1000);
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
+		}		
 	}
 	
 }
@@ -223,7 +289,11 @@ class IOThread extends Thread {
 			if (str.equals("exit")) {
 				
 			} else if (str.equals("print")) {
-				
+				System.out.println("--------File chunks---------");
+				for(String filename:cs.fileToChunkHash.keySet()) {
+					System.out.println(filename + ":" + cs.fileToChunkHash.get(filename));
+				}
+				System.out.println("----------------------------");
 			}
 			
 		}

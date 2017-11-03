@@ -1,6 +1,9 @@
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+
+import sun.security.x509.FreshestCRLExtension;
+
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -11,8 +14,8 @@ public class Controller extends Thread{
 	
 	ExecutorService threadPool = Executors.newFixedThreadPool(10);
 
-	ArrayList<CSDescriptor> csList = new ArrayList<CSDescriptor>();
-	ArrayList<ChunkDescriptor> chunkList = new ArrayList<ChunkDescriptor>();
+	HashMap<String,CSDescriptor> chunkServerMap = new HashMap<String,CSDescriptor>(); //mapping from host:port to chunk server descriptor
+	HashMap<String,ChunkDescriptor> chunkMap = new HashMap<String,ChunkDescriptor>(); //mapping from chuck name to chunk descriptor
 	
 	boolean RUNNING = true;
 	
@@ -37,22 +40,17 @@ public class Controller extends Thread{
         	this.port = Integer.parseInt(str[1]);
         }
         this.start();
-        this.startHeartbeatThread();
+        new ControllerHeartbeatThread().start();
 	}	
 	
-	private void startHeartbeatThread() {
-		//send heartbeats to the chunk server to know if it's alive or not if not replicate files
-		// OUTSIDE heartbeat skim
-		// this tread is always up
-		this.threadPool.execute(new ControllerHeartbeatThread());
-	}
 	
 	public void run() {
-		try {
+		try {			
 			ServerSocket svsocket = new ServerSocket(this.port);
+			System.out.println("Server started...");
 			while (RUNNING) {
 				Socket sock = svsocket.accept();
-				this.threadPool.execute(new ControllerSocketThread(sock));
+				this.threadPool.execute(new ControllerSocketThread(sock,this));
 			}
 			svsocket.close();
 		} catch (Exception ex) {
@@ -64,24 +62,37 @@ public class Controller extends Thread{
 }
 
 class CSDescriptor{
-	public String host;
-	public int port;
+	//public String host;
+	//public int port;
 	public long free_space;
 	public long total_chunks;
+	public CSDescriptor(long free_space, long total_chunks) {
+		this.free_space = free_space;
+		this.total_chunks = total_chunks;
+	}
+	
 }
 
 class ChunkDescriptor{
-	public UUID chunkId;
-	public String filename;
-	public String chunkname;
+	public String originalFilename;
+	//public String chunkname;
 	public long sequence;
-	public long version;
-	public long timestamp;
-	public ArrayList<CSDescriptor> cslist = new ArrayList<>();
+	public HashSet<String> cslist = new HashSet<>();
+	
+	public ChunkDescriptor(String originalFilename, long sequence, String chunkServerId) {
+		this.originalFilename = originalFilename;
+		this.sequence = sequence;
+		cslist.add(chunkServerId);
+	}
+	
+	@Override
+	public String toString() {
+		return originalFilename + "," + sequence + "," + cslist;
+	}
 }
 
 
-class ControllerHeartbeatThread implements Runnable{
+class ControllerHeartbeatThread extends Thread{
 
 	@Override
 	public void run() {
@@ -93,15 +104,41 @@ class ControllerHeartbeatThread implements Runnable{
 
 class ControllerSocketThread implements Runnable {
 	Socket sock;
+	Controller controller;
 
-	public ControllerSocketThread(Socket sock) {
+	public ControllerSocketThread(Socket sock, Controller controller) {
 		this.sock = sock;
+		this.controller = controller;
 	}
 
 	public void run() {
 
 		try {
-			
+			String action = Utils.readStringFromSocket(sock);
+			System.out.println(action);
+			if(action.equals("#MAJOR_HEARTBEAT#")) {
+				//read chunk server info
+				String server_info = Utils.readStringFromSocket(sock);
+				String[] info = server_info.split(",");
+				String server_id = info[0] + ":" + info[1];
+				long free_space = Long.parseLong(info[2]);
+				long total_chunks = Long.parseLong(info[3]);
+				controller.chunkServerMap.put(server_id, new CSDescriptor(free_space, total_chunks));
+				
+				for(int i = 0 ; i < total_chunks; i++) {
+					String chunk_info = Utils.readStringFromSocket(sock);
+					System.out.println(chunk_info);
+					String[] info_arr = chunk_info.split(",");
+					String chunkName = info_arr[0];
+					String originalFileName = info_arr[1];
+					long sequence = Long.parseLong(info_arr[2]);
+					controller.chunkMap.put(chunkName, new ChunkDescriptor(originalFileName,sequence,server_id));					
+				}
+				System.out.println(controller.chunkMap);
+				
+			}else if(action.equals("#MINOR_HEARTBEAT#")) {
+				
+			}
 			sock.close();
 		} catch (IOException e) {
 			e.printStackTrace();

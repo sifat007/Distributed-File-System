@@ -63,7 +63,7 @@ public class Client{
 			File f = this.fileChunks.get(i);
 			//send to chunk server
 			try {
-				String forwardChunkServers = "boise.cs.colostate.edu:57890,denver.cs.colostate.edu:57890";
+				String forwardChunkServers = "";//"boise.cs.colostate.edu:57890,denver.cs.colostate.edu:57890";
 				Socket sock = new Socket(tempCS, tempCSport);	
 				Utils.writeStringToSocket(sock, "#SAVE_CHUNK#");
 				Utils.writeStringToSocket(sock, forwardChunkServers); //send ArrayList of other chunks to forward the file to
