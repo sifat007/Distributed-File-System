@@ -1,5 +1,6 @@
 import java.io.*;
 import java.net.*;
+import java.util.*;
 
 public class Utils {
 	
@@ -30,6 +31,7 @@ public class Utils {
 		OOS.writeObject(obj);
 	}
 	
+	
 	/**
 	 * Reads a file from socket, saves in the /tmp directory, returns the filename
 	 * @param sock
@@ -39,10 +41,14 @@ public class Utils {
 	 */
 	
 	public static File readFileFromSocket(Socket sock) throws IOException, ClassNotFoundException{
+		return readFileFromSocket(sock, STORAGE_PATH);
+	}
+
+	public static File readFileFromSocket(Socket sock, String outputDir) throws IOException, ClassNotFoundException{
 		ObjectInputStream ois = new ObjectInputStream(sock.getInputStream());
 		String filename = (String)ois.readObject();
 		System.out.println("Received file "+ filename);
-		File file = new File(STORAGE_PATH+filename);
+		File file = new File(outputDir+filename);
 		FileOutputStream fos = new FileOutputStream(file);
 		BufferedOutputStream bos = new BufferedOutputStream(fos);
 		
@@ -83,6 +89,21 @@ public class Utils {
 		}
 		System.out.println("Sending file "+ file.getName());
         bis.close();
+	}
+	
+	public static <K, V extends Comparable<? super V>> Map<K, V> sortByValue(Map<K, V> map) {
+	    List<Map.Entry<K, V>> list = new LinkedList<Map.Entry<K, V>>(map.entrySet());
+	    Collections.sort( list, new Comparator<Map.Entry<K, V>>() {
+	        public int compare(Map.Entry<K, V> o1, Map.Entry<K, V> o2) {
+	            return (o1.getValue()).compareTo( o2.getValue() );
+	        }
+	    });
+	
+	    Map<K, V> result = new LinkedHashMap<K, V>();
+	    for (Map.Entry<K, V> entry : list) {
+	        result.put(entry.getKey(), entry.getValue());
+	    }
+	    return result;
 	}
 	
 
