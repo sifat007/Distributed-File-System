@@ -42,7 +42,7 @@ public class Controller extends Thread{
         	this.port = Integer.parseInt(str[1]);
         }
         this.start();
-        new ControllerHeartbeatThread().start();
+        new ControllerHeartbeatThread(this).start();
 	}	
 	
 	
@@ -59,6 +59,23 @@ public class Controller extends Thread{
 			ex.printStackTrace();
 		}
 		this.threadPool.shutdown();
+	}
+
+	public void handleChunkServerFailure(String server) {
+		synchronized (chunkMap) {
+			//find all chunks that the server contains
+			for(ChunkDescriptor csDescriptor: chunkMap.values()) {
+				if(csDescriptor.cslist.contains(server)) {
+					csDescriptor.removeServer(server);					
+					//TODO: make another copy of all the found chunks
+					
+				}
+			}
+			
+			
+		}
+
+		
 	}
 			
 }
@@ -101,6 +118,10 @@ class ChunkDescriptor{
 		cslist.add(chunkServerId);
 	}
 	
+	public void removeServer(String chunkServerId) {
+		cslist.remove(chunkServerId);
+	}
+	
 	@Override
 	public String toString() {
 		return originalFilename + "," + sequence + "," + cslist;
@@ -109,10 +130,39 @@ class ChunkDescriptor{
 
 
 class ControllerHeartbeatThread extends Thread{
+	
+	Controller controller;
+	public ControllerHeartbeatThread(Controller controller) {
+		this.controller = controller;
+	}
 
 	@Override
 	public void run() {
-		
+		while(controller.RUNNING) {
+			synchronized (controller.chunkServerMap) {
+				for(String server: controller.chunkServerMap.keySet()) {
+					//check if server alive
+					String[] info = server.split(":");
+					Socket sock = null;
+					try {
+						sock = new Socket(info[0], Integer.parseInt(info[1]));
+						Utils.writeStringToSocket(sock, "#PING_FROM_CONTROLLER#");
+					} catch (NumberFormatException | IOException e) {
+						System.out.println(e.getMessage());
+					}		
+					if(sock == null) {
+						System.out.println("Chunk server "+server+" failure detected. Initiating fix...");
+						controller.handleChunkServerFailure(server);
+					}
+				}				
+			}
+			
+			try {
+				Thread.sleep(5 * 1000);
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
+		}	
 	}
 	
 }
