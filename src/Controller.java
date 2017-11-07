@@ -97,6 +97,10 @@ class ChunkDescriptor{
 		cslist.add(chunkServerId);
 	}
 	
+	public void addServer(String chunkServerId) {
+		cslist.add(chunkServerId);
+	}
+	
 	@Override
 	public String toString() {
 		return originalFilename + "," + sequence + "," + cslist;
@@ -137,7 +141,9 @@ class ControllerSocketThread implements Runnable {
 				String server_id = info[0] + ":" + info[1];
 				long free_space = Long.parseLong(info[2]);
 				long total_chunks = Long.parseLong(info[3]);
-				controller.chunkServerMap.put(server_id, new CSDescriptor(free_space, total_chunks));
+				synchronized (controller.chunkServerMap) {
+					controller.chunkServerMap.put(server_id, new CSDescriptor(free_space, total_chunks));
+				}				
 				System.out.println(server_info);
 				for(int i = 0 ; i < total_chunks; i++) {
 					readChunckMetadata(server_id);
@@ -152,8 +158,10 @@ class ControllerSocketThread implements Runnable {
 				String server_id = info[0] + ":" + info[1];
 				long free_space = Long.parseLong(info[2]);
 				long total_chunks = Long.parseLong(info[3]);
-				if(controller.chunkServerMap.containsKey(server_id)==false)request_major_heartbeat = true;
-				controller.chunkServerMap.put(server_id, new CSDescriptor(free_space, total_chunks));
+				synchronized (controller.chunkServerMap) {
+					if(controller.chunkServerMap.containsKey(server_id)==false)request_major_heartbeat = true;
+					controller.chunkServerMap.put(server_id, new CSDescriptor(free_space, total_chunks));
+				}				
 				long new_chunk_count = Long.parseLong(Utils.readStringFromSocket(sock));
 				//System.out.println("Receiving " +new_chunk_count+ " new metadata");
 				for(int i = 0 ; i < new_chunk_count; i++) {
@@ -163,42 +171,77 @@ class ControllerSocketThread implements Runnable {
 				//System.out.println(controller.chunkMap);				
 			}else if(action.equals("#CHUNKLIST#")) {
 				String filename = Utils.readStringFromSocket(sock);
-				if(controller.filenameToChunkMap.containsKey(filename)==false) {
-					Utils.writeStringToSocket(sock, "$FILE_NOT_FOUND$");
-				}else {
-					Utils.writeStringToSocket(sock, "$FILE_FOUND$");
-					Set<String> files = controller.filenameToChunkMap.get(filename);
-					String str = "";
-					for(String chunkName: files) {
-						str += chunkName + ",";
+				synchronized (controller.filenameToChunkMap) {
+					if(controller.filenameToChunkMap.containsKey(filename)==false) {
+						Utils.writeStringToSocket(sock, "$FILE_NOT_FOUND$");
+					}else {
+						Utils.writeStringToSocket(sock, "$FILE_FOUND$");
+						Set<String> files = controller.filenameToChunkMap.get(filename);
+						String str = "";
+						for(String chunkName: files) {
+							str += chunkName + ",";
+						}
+						str = str.substring(0, str.length()-1);
+						Utils.writeStringToSocket(sock, str);
 					}
-					str = str.substring(0, str.length()-1);
-					Utils.writeStringToSocket(sock, str);
 				}
-								
 			}else if(action.equals("#GET_SERVERS_FOR_A_CHUNK#")) {
 				String chunkName = Utils.readStringFromSocket(sock);
-				ChunkDescriptor chunkDescriptor = controller.chunkMap.get(chunkName);
-				String serverList = "";
-				for(String s:chunkDescriptor.cslist) {
-					serverList += "," + s;
-				}
-				serverList = serverList.substring(1);
+				String serverList = getChunkServersContainingChunk(chunkName);
 				Utils.writeStringToSocket(sock, serverList);
+				
 			}else if(action.equals("#REQUEST_FREE_CHUNK_SERVER#")) {
-				//TODO: sorted hashmap
-				Map<String, CSDescriptor> sortedMap = Utils.sortByValue(controller.chunkServerMap);
-				String str = "";
-				for(Entry<String, CSDescriptor> e:sortedMap.entrySet()) {
-					System.out.println(e.getKey() + ":" + e.getValue());
-					str += e.getKey() + ",";
+				String chunkName = Utils.readStringFromSocket(sock);
+				boolean containsAlready;
+				synchronized (controller.chunkMap) {
+					containsAlready = controller.chunkMap.containsKey(chunkName);
 				}
-				Utils.writeStringToSocket(sock, str);
-			}
+				if(containsAlready) { // if chunk already exists; return the servers where the chunk is saved
+					System.out.println("Chunk already exists. Sending previously used chunk servers to overwrite the chunk.");
+					String serverList = getChunkServersContainingChunk(chunkName);
+					Utils.writeStringToSocket(sock, serverList);
+				}else {			//otherwise, send server list to save new chunk
+					//sorted hashmap
+					Map<String, CSDescriptor> sortedMap;
+					synchronized (controller.chunkServerMap) {
+						sortedMap = Utils.sortByValue(controller.chunkServerMap);
+					}
+					String str = "";
+					int count = 0;
+					for(Entry<String, CSDescriptor> e:sortedMap.entrySet()) {
+						System.out.println(e.getKey() + ":" + e.getValue());
+						if(count < 3) {
+							str += "," + e.getKey();
+						}else {
+							break;
+						}					
+						count++;
+					}
+					str = str.substring(1);
+					Utils.writeStringToSocket(sock, str);
+				}
+			}				
+			
 			sock.close();
 		} catch (IOException e) {
 			e.printStackTrace();
 		}
+	}
+
+
+
+	private String getChunkServersContainingChunk(String chunkName) throws IOException {
+		ChunkDescriptor chunkDescriptor;
+		synchronized (controller.chunkMap) {
+			chunkDescriptor = controller.chunkMap.get(chunkName);
+		}
+		String serverList = "";
+		for(String s:chunkDescriptor.cslist) {
+			serverList += "," + s;
+		}
+		serverList = serverList.substring(1);		
+		return serverList;
+		
 	}
 
 
@@ -210,13 +253,24 @@ class ControllerSocketThread implements Runnable {
 		String chunkName = info_arr[0];
 		String originalFileName = info_arr[1];
 		long sequence = Long.parseLong(info_arr[2]);
-		controller.chunkMap.put(chunkName, new ChunkDescriptor(originalFileName,sequence,server_id));	
-		Set<String> set = controller.filenameToChunkMap.get(originalFileName);
-		if(set == null) {
-			set = new HashSet<>();
+		synchronized (controller.chunkMap) {
+			if(controller.chunkMap.containsKey(chunkName)) {
+				ChunkDescriptor cd = controller.chunkMap.get(chunkName);
+				cd.addServer(server_id);
+			}else {
+				controller.chunkMap.put(chunkName, new ChunkDescriptor(originalFileName,sequence,server_id));
+			}
 		}
-		set.add(chunkName);
-		controller.filenameToChunkMap.put(originalFileName, set);
+		
+		synchronized (controller.filenameToChunkMap) {
+			Set<String> set = controller.filenameToChunkMap.get(originalFileName);
+			if(set == null) {
+				set = new HashSet<>();
+			}
+			set.add(chunkName);
+			controller.filenameToChunkMap.put(originalFileName, set);
+		}
+		
 	}
 }
 

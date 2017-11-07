@@ -111,6 +111,7 @@ public class Client{
 			Utils.writeStringToSocket(sock, "#GET_SERVERS_FOR_A_CHUNK#");
 			Utils.writeStringToSocket(sock, chunkName);
 			String chunkServers = Utils.readStringFromSocket(sock);
+			System.out.println("Servers containing the chunk "+chunkName+": " + chunkServers);
 			sock.close();
 			String[] serverList = chunkServers.split(",");
 			
@@ -152,16 +153,34 @@ public class Client{
 		
 		for(int i = 0 ; i < this.fileChunks.size(); i++) {		
 			File f = this.fileChunks.get(i);
-			//send to chunk server
 			try {
-				String forwardChunkServers = "";//"boise.cs.colostate.edu:57890,denver.cs.colostate.edu:57890";
-				Socket sock = new Socket(tempCS, tempCSport);	
-				Utils.writeStringToSocket(sock, "#SAVE_CHUNK#");
-				Utils.writeStringToSocket(sock, forwardChunkServers); //send ArrayList of other chunks to forward the file to
-				Utils.writeStringToSocket(sock, this.filename);
-				Utils.writeStringToSocket(sock, i+"");
-				Utils.writeFileToSocket(sock, f);	
+				Socket sock = new Socket(CONTROLLER_HOST, CONTROLLER_PORT);
+				Utils.writeStringToSocket(sock, "#REQUEST_FREE_CHUNK_SERVER#");
+				//send the chunk trying to save; it'll check if the chunk already exists
+				//if it does, then the servers list will be for that specific chunk, so that the chunk is overwritten.
+				Utils.writeStringToSocket(sock, f.getName());  
+				String chunkServers = Utils.readStringFromSocket(sock);
+				System.out.println("Servers List: " + chunkServers);
 				sock.close();
+				String[] serverList = chunkServers.split(",");
+				
+				String[] nextServer = serverList[0].split(":");
+				chunkServers = "";
+				if(serverList.length > 1) {
+					chunkServers = serverList[1];
+					for(int k = 2; k < serverList.length; k++) {
+						chunkServers += ","+serverList[k];
+					}
+				}
+				//send to chunk server
+				
+				Socket sock1 = new Socket(nextServer[0], Integer.parseInt(nextServer[1]));	
+				Utils.writeStringToSocket(sock1, "#SAVE_CHUNK#");
+				Utils.writeStringToSocket(sock1, chunkServers); //send ArrayList of other chunks to forward the file to
+				Utils.writeStringToSocket(sock1, this.filename);
+				Utils.writeStringToSocket(sock1, i+"");
+				Utils.writeFileToSocket(sock1, f);	
+				sock1.close();
 			}catch (IOException e) {
 				e.printStackTrace();
 			}

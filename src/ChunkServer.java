@@ -78,37 +78,52 @@ public class ChunkServer extends Thread{
 		this.threadPool.shutdown();
 	}
 	
+	
+
+	
 	public void saveChunkAndForward(File chunkFile, String originalFileName, int sequence, String forwardChunkServers) throws IOException{
-		Set<File> chunks = filenameToChunkMap.get(originalFileName);
-		if(chunks == null) {
-			chunks = new HashSet<>();			
+		synchronized (filenameToChunkMap) {
+			Set<File> chunks = filenameToChunkMap.get(originalFileName);
+			if(chunks == null) {
+				chunks = new HashSet<>();			
+			}
+			chunks.add(chunkFile);
+			filenameToChunkMap.put(originalFileName, chunks);	
 		}
-		chunks.add(chunkFile);
-		filenameToChunkMap.put(originalFileName, chunks);
 		
-		chunknameToFileMap.put(chunkFile.getName(), chunkFile);
+		synchronized (chunknameToFileMap) {
+			chunknameToFileMap.put(chunkFile.getName(), chunkFile);
+		}
 		
-		File checksumFile = this.createChecksumFile(chunkFile);
-		chunknameToChecksumMap.put(chunkFile.getName(),checksumFile);
+		synchronized (chunknameToChecksumMap) {
+			File checksumFile = this.createChecksumFile(chunkFile);
+			chunknameToChecksumMap.put(chunkFile.getName(),checksumFile);
+		}
 		
-		int version = 0;
-		File metaFile = new File(chunkFile.getPath() + ".metadata");
-		if(metaFile.exists()) {
-			try(Scanner scanner = new Scanner(metaFile)){
-				version = scanner.nextInt();
+		synchronized (chunknameToMetaDataMap) {
+			int version = 0;
+			File metaFile = new File(chunkFile.getPath() + ".metadata");
+			if(metaFile.exists()) {
+				try(Scanner scanner = new Scanner(metaFile)){
+					version = scanner.nextInt();
+					if(sequence == -1)sequence = scanner.nextInt();
+				}		
+			}
+			
+			
+			try(PrintWriter out = new PrintWriter( metaFile ) ){
+			    out.println( version + 1 ); //increment version
+			    out.println(sequence);
+			    out.println(originalFileName);
+			    out.println(System.currentTimeMillis());
 			}		
+			chunknameToMetaDataMap.put(chunkFile.getName(),metaFile);
+			
+			//track new files; will be removed as soon as pushed to the controller
+			transientChunknametoMetaDataMap.put(chunkFile.getName(), metaFile);
 		}
 		
-		
-		try(PrintWriter out = new PrintWriter( metaFile ) ){
-		    out.println( version + 1 ); //increment version
-		    out.println(sequence);
-		    out.println(originalFileName);
-		    out.println(System.currentTimeMillis());
-		}		
-		chunknameToMetaDataMap.put(chunkFile.getName(),metaFile);
-		//track new files; will be removed as soon as pushed to the controller
-		transientChunknametoMetaDataMap.put(chunkFile.getName(), metaFile);
+
 		
 				
 		//forward the chunk to the next chunk server
@@ -124,6 +139,7 @@ public class ChunkServer extends Thread{
 			}
 			final String _forwardChunkServers = forwardChunkServers;
 			
+			final int _sequence = sequence;
 			this.threadPool.execute(new Runnable() {			
 				@Override
 				public void run() {
@@ -133,7 +149,7 @@ public class ChunkServer extends Thread{
 						Utils.writeStringToSocket(sock, "#SAVE_CHUNK#");
 						Utils.writeStringToSocket(sock, _forwardChunkServers); //send ArrayList of other chunks to forward the file to
 						Utils.writeStringToSocket(sock, originalFileName);
-						Utils.writeStringToSocket(sock, sequence +"");
+						Utils.writeStringToSocket(sock, _sequence +"");
 						Utils.writeFileToSocket(sock, chunkFile);
 						sock.close();
 					} catch (NumberFormatException | IOException e) {
@@ -213,6 +229,61 @@ public class ChunkServer extends Thread{
 		
 		return isCorrupted;
 	}
+
+	public void fixFileCorruption(String chunkName) throws UnknownHostException, IOException {
+		System.out.println("Corruption detected in file "+ chunkName +". Initiating fix...");
+		this.threadPool.execute(new Runnable() {
+			@Override
+			public void run() {
+				try {
+					Socket sock = new Socket(CONTROLLER_HOST, CONTROLLER_PORT);
+					Utils.writeStringToSocket(sock, "#GET_SERVERS_FOR_A_CHUNK#");
+					Utils.writeStringToSocket(sock, chunkName);
+					String chunkServers = Utils.readStringFromSocket(sock);
+					System.out.println("Servers containing the chunk "+chunkName+": " + chunkServers);
+					sock.close();
+					String[] serverList = chunkServers.split(",");
+					String currentServer = InetAddress.getLocalHost().getCanonicalHostName() +":"+ port;
+					String anotherServer = null;
+					for(int i = 0; i < serverList.length; i++) {
+						if(serverList[i].equals(currentServer)==false) {
+							anotherServer = serverList[i];
+							break;
+						}
+					}
+					if(anotherServer == null) {
+						System.out.println("No other chunk server contains the chunk "  + chunkName);
+					}else {
+						//TODO: get the chunk from the other server and fix the problem
+						System.out.println("Getting correct version of the chunk "  + chunkName + " from chunk server " + anotherServer);
+						String[] nextServer = anotherServer.split(":");
+						Socket sock1 = new Socket(nextServer[0], Integer.parseInt(nextServer[1]));
+						
+						Utils.writeStringToSocket(sock1, "#GET_CHUNK#");
+						Utils.writeStringToSocket(sock1, ""); //nothing to forward
+						Utils.writeStringToSocket(sock1, chunkName);
+						String isFileOK = Utils.readStringFromSocket(sock1);
+						if(isFileOK.equals("$FILE_OK$")) {
+							File chunkFile = Utils.readFileFromSocket(sock1);
+							saveChunkAndForward(chunkFile,chunkName,-1,"");
+							System.out.println("Corruption in file "+ chunkName + " fixed.");
+						}else {
+							System.out.println("Could not fix corruption in file "+ chunkName);
+						}
+						
+					}
+					
+					
+				} catch (IOException | ClassNotFoundException e) {
+					e.printStackTrace();
+				}
+				
+				
+			}
+		});
+
+		
+	}
 }
 
 class ChunkServerHeartbeatThread extends Thread{
@@ -231,26 +302,36 @@ class ChunkServerHeartbeatThread extends Thread{
 		try {		
 			if(sock!=null) {
 				//write chunk server info
-				String server_info = InetAddress.getLocalHost().getCanonicalHostName() +","+ 
-									cs.port +","+ 
-									new File(Utils.STORAGE_PATH).getUsableSpace() +","+
-									cs.chunknameToMetaDataMap.keySet().size();
+				String server_info;
+				synchronized (cs.chunknameToMetaDataMap) {
+					server_info = InetAddress.getLocalHost().getCanonicalHostName() +","+ 
+							cs.port +","+ 
+							new File(Utils.STORAGE_PATH).getUsableSpace() +","+
+							cs.chunknameToMetaDataMap.keySet().size();
+				}
+				
 				if(heartbeatCount % 10 == 0) {
 					System.out.println("Major Heartbeat.");
 					Utils.writeStringToSocket(sock, "#MAJOR_HEARTBEAT#");
 					Utils.writeStringToSocket(sock, server_info);
-					sendChunkMetadata(sock, cs.chunknameToMetaDataMap);
+					synchronized (cs.chunknameToMetaDataMap) {
+						synchronized (cs.transientChunknametoMetaDataMap) {
+							sendChunkMetadata(sock, cs.chunknameToMetaDataMap);
+						}						
+					}					
 				}else { //minor heartbeat
 					System.out.println("Minor Heartbeat.");
 					Utils.writeStringToSocket(sock, "#MINOR_HEARTBEAT#");
 					Utils.writeStringToSocket(sock, server_info);
 					
-					//send how many new chunks
-					Utils.writeStringToSocket(sock, cs.transientChunknametoMetaDataMap.size() +"");
-					//send the new chunks
-					sendChunkMetadata(sock, cs.transientChunknametoMetaDataMap);
-					
-										
+					synchronized (cs.chunknameToMetaDataMap) {
+						synchronized (cs.transientChunknametoMetaDataMap) {
+							//send how many new chunks
+							Utils.writeStringToSocket(sock, cs.transientChunknametoMetaDataMap.size() +"");
+							//send the new chunks
+							sendChunkMetadata(sock, cs.transientChunknametoMetaDataMap);
+						}					
+					}
 					boolean request_major_heartbeat = Boolean.parseBoolean(Utils.readStringFromSocket(sock));
 					return request_major_heartbeat;
 				}
@@ -318,6 +399,7 @@ class ChunkServerSocketThread implements Runnable {
 
 		try {
 			String action = Utils.readStringFromSocket(sock);
+			System.out.println(action);
 			if(action.equals("#SAVE_CHUNK#")) {
 				String forwardChunkServers = Utils.readStringFromSocket(sock); //read arraylist of other chunk servers to forward the file to one of them
 				String originalFileName = Utils.readStringFromSocket(sock);
@@ -328,18 +410,52 @@ class ChunkServerSocketThread implements Runnable {
 				String forwardChunkServers = Utils.readStringFromSocket(sock); //read arraylist of other chunk servers to check file corruption
 				String chunkName = Utils.readStringFromSocket(sock);
 				if(cs.checkChunkForCorruption(chunkName)) {
-					Utils.writeStringToSocket(sock, "$FILE_CORRUPTED$");
+					Utils.writeStringToSocket(sock, "$FILE_CORRUPTED$");  
+					cs.fixFileCorruption(chunkName);			//TODO: Do something about the corruption
 				}else {
 					Utils.writeStringToSocket(sock, "$FILE_OK$");
 					File chunkFile = cs.chunknameToFileMap.get(chunkName);
 					Utils.writeFileToSocket(sock, chunkFile);
 				}
 				//TODO: Check the other servers for corruption
+				checkOtherChunkServersForCorruption(forwardChunkServers, chunkName);
+				
+			}else if(action.equals("#CHECK_CHUNK_FOR_CORRUPTION#")) {
+				String forwardChunkServers = Utils.readStringFromSocket(sock); //read arraylist of other chunk servers to check file corruption
+				String chunkName = Utils.readStringFromSocket(sock);
+				if(cs.checkChunkForCorruption(chunkName)) {
+					//Utils.writeStringToSocket(sock, "$FILE_CORRUPTED$");  
+					cs.fixFileCorruption(chunkName);				//TODO: Do something about the corruption
+				}
+				//TODO: Check the other servers for corruption; forward
+				checkOtherChunkServersForCorruption(forwardChunkServers, chunkName);				
 			}
 			sock.close();
 		} catch (IOException | ClassNotFoundException e) {
 			e.printStackTrace();
 		}
+	}
+
+	private void checkOtherChunkServersForCorruption(String forwardChunkServers, String chunkName) throws UnknownHostException, IOException {
+		if(forwardChunkServers.length() > 0) {
+			String[] serverList = forwardChunkServers.split(",");
+			
+			String[] nextServer = serverList[0].split(":");
+			forwardChunkServers = "";
+			if(serverList.length > 1) {
+				forwardChunkServers = serverList[1];
+				for(int i = 2; i < serverList.length; i++) {
+					forwardChunkServers += ","+serverList[i];
+				}
+			}
+			
+			//get the chunk from first chunk server
+			Socket sock1= new Socket(nextServer[0], Integer.parseInt(nextServer[1]));
+			Utils.writeStringToSocket(sock1, "#CHECK_CHUNK_FOR_CORRUPTION#");
+			Utils.writeStringToSocket(sock1, forwardChunkServers);
+			Utils.writeStringToSocket(sock1, chunkName);	
+		}
+		
 	}
 }
 
